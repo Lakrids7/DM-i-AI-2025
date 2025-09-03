@@ -2,6 +2,9 @@ from pydantic import BaseModel
 from typing import Dict, Optional, List
 
 
+
+
+#
 class RaceCarPredictRequestDto(BaseModel):
     did_crash: bool
     elapsed_ticks: int
