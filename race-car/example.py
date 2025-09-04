@@ -14,6 +14,7 @@ from collections import namedtuple, deque
 
 Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'))
 
+
 class DQN(nn.Module):
     def __init__(self, n_observations, n_actions):
         super(DQN, self).__init__()
@@ -25,6 +26,7 @@ class DQN(nn.Module):
         x = F.relu(self.layer1(x))
         x = F.relu(self.layer2(x))
         return self.layer3(x)
+
 
 class ReplayMemory(object):
     def __init__(self, capacity):
@@ -39,6 +41,7 @@ class ReplayMemory(object):
     def __len__(self):
         return len(self.memory)
 
+
 class DQNAgent:
     def __init__(self, n_observations, n_actions, config):
         self.batch_size = config['BATCH_SIZE']
@@ -51,7 +54,7 @@ class DQNAgent:
         self.memory = ReplayMemory(config['MEMORY_CAPACITY'])
 
         self.n_actions = n_actions
-        self.device = torch.device("cpu") # Forcing CPU since the server environment is CPU-only
+        self.device = torch.device("cpu")  # Forcing CPU since the server environment is CPU-only
         print(f"Using device: {self.device}")
 
         self.policy_net = DQN(n_observations, n_actions).to(self.device)
@@ -70,6 +73,7 @@ class DQNAgent:
             print(f"Model loaded from {path}")
         else:
             print(f"No model found at {path}, starting from scratch.")
+
 
 # --- CONSTANTS AND MODEL INITIALIZATION ---
 
@@ -112,36 +116,44 @@ def return_action(state: dict):
     Returns:
         dict: A dictionary containing the action chosen by the model.
     """
-    # --- 1. PREPROCESS THE INPUT ---
-    max_sensor_range = 1000.0  # Use the same normalization value as during training
-
-    # Extract sensor readings from the input dictionary.
+    max_sensor_range = 1000.0
     sensor_data = state.get('sensors', [])
 
-    # --- FIX: Treat each item in sensor_data as the reading itself ---
-    # The error showed that `sensor_data` is a list of values, not a list of dicts.
-    readings = [
-        (float(reading) if reading is not None else max_sensor_range) / max_sensor_range
-        for reading in sensor_data
-    ]
+    # --- FIX: Add robust data cleaning to handle non-numerical sensor values ---
+    readings = []
+    for reading in sensor_data:
+        try:
+            # First, handle the case where reading is None
+            if reading is None:
+                # If there's no reading, treat it as seeing something at max distance
+                normalized_value = max_sensor_range / max_sensor_range
+            else:
+                # Try to convert the reading to a float. This will fail for strings like 'front'.
+                normalized_value = float(reading) / max_sensor_range
 
-    # --- 2. CONVERT TO TENSOR ---
-    # Create the tensor from the clean list of numbers
+            readings.append(normalized_value)
+        except (ValueError, TypeError):
+            # If float(reading) fails, it's a non-numerical string. Treat it as max distance.
+            readings.append(max_sensor_range / max_sensor_range)  # Append 1.0
+
+    # Ensure the readings list is the correct size, padding if necessary
+    while len(readings) < NUM_SENSORS:
+        readings.append(max_sensor_range / max_sensor_range)
+
+    # Truncate if it's too long
+    readings = readings[:NUM_SENSORS]
+
+    # --- Convert to tensor and get model prediction ---
     state_tensor = torch.tensor(readings, dtype=torch.float32, device=agent.device).unsqueeze(0)
 
-    # --- 3. GET ACTION FROM MODEL ---
-    # Use torch.no_grad() for faster inference as we don't need to calculate gradients
     with torch.no_grad():
-        # Get the Q-values from the policy network
         action_q_values = agent.policy_net(state_tensor)
-        # Select the action with the highest Q-value
         action_tensor = action_q_values.max(1)[1].view(1, 1)
 
     action_index = action_tensor.item()
-    action_string = ACTION_MAP.get(action_index, 'NOTHING') # Default to 'NOTHING' if index is out of bounds
+    action_string = ACTION_MAP.get(action_index, 'NOTHING')  # Default to 'NOTHING' if index is out of bounds
 
-    # --- 4. FORMAT THE OUTPUT FOR THE API ---
-    # The API expects a dictionary in a specific format
+    # --- Format the output for the API ---
     return {
         "action_type": "string",
         "actions": [action_string]
@@ -150,7 +162,6 @@ def return_action(state: dict):
 
 # This part below is for local testing with Pygame and will not be run by the API server.
 if __name__ == '__main__':
-    # This requires the 'src.game.core' module to be available
     try:
         import pygame
         from src.game.core import initialize_game_state, game_loop
@@ -158,9 +169,7 @@ if __name__ == '__main__':
         print("\n--- Running local Pygame simulation for testing ---")
         seed_value = None
         pygame.init()
-        # Note: The api_url is just a placeholder for local testing
         initialize_game_state("http://localhost/api", seed_value)
-        # The game_loop will need to be adapted to use the agent defined in this file
         game_loop(agent=agent, verbose=True)
         pygame.quit()
     except ImportError:
