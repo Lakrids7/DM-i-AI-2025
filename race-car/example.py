@@ -28,16 +28,16 @@ agent.policy_net.eval()  # Set the model to evaluation mode
 
 print("--- Trained model loaded successfully. Ready for inference. ---")
 
-def return_action(state):
-    # Returns a list of actions
-    actions = []
-    action_choices = ['ACCELERATE', 'DECELERATE', 'STEER_LEFT', 'STEER_RIGHT', 'NOTHING']
-    for _ in range(10):
-        actions.append(random.choice(action_choices))
-    return actions
+# def return_action(state):
+#     # Returns a list of actions
+#     actions = []
+#     action_choices = ['ACCELERATE', 'DECELERATE', 'STEER_LEFT', 'STEER_RIGHT', 'NOTHING']
+#     for _ in range(10):
+#         actions.append(random.choice(action_choices))
+#     return actions
 
 
-'''
+
 def return_action(state):
     """
     Uses the trained DQN model to return the best action for the given state.
@@ -67,7 +67,6 @@ def return_action(state):
     action_index = action_tensor.item()
 
     return action_map[action_index]
-'''
 
 
 
