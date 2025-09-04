@@ -82,7 +82,7 @@ NUM_SENSORS = 16
 NUM_ACTIONS = 3  # The model was trained to output one of 3 actions
 
 # The action map must match the output of the neural network
-ACTION_MAP = {0: 'STEER_LEFT', 1: 'STEER_RIGHT', 2: 'NOTHING'}
+ACTION_MAP = {0: 'STEER_LEFT', 1: 'STEER_RIGHT', 2: 'ACCELERATE'}
 
 # Define the configuration your agent was trained with.
 config = {
