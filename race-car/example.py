@@ -108,42 +108,27 @@ print("--- Trained model loaded successfully. Ready for inference. ---")
 
 def return_action(state: dict):
     """
-    Processes the raw game state dictionary from the API request and returns an action.
-
-    Args:
-        state (dict): The current state of the game, received as a dictionary.
-
-    Returns:
-        dict: A dictionary containing the action chosen by the model.
+    Processes the raw game state dictionary and returns a list of actions.
     """
     max_sensor_range = 1000.0
     sensor_data = state.get('sensors', [])
 
-    # --- FIX: Add robust data cleaning to handle non-numerical sensor values ---
     readings = []
     for reading in sensor_data:
         try:
-            # First, handle the case where reading is None
             if reading is None:
-                # If there's no reading, treat it as seeing something at max distance
                 normalized_value = max_sensor_range / max_sensor_range
             else:
-                # Try to convert the reading to a float. This will fail for strings like 'front'.
                 normalized_value = float(reading) / max_sensor_range
-
             readings.append(normalized_value)
         except (ValueError, TypeError):
-            # If float(reading) fails, it's a non-numerical string. Treat it as max distance.
-            readings.append(max_sensor_range / max_sensor_range)  # Append 1.0
+            readings.append(max_sensor_range / max_sensor_range)
 
-    # Ensure the readings list is the correct size, padding if necessary
     while len(readings) < NUM_SENSORS:
         readings.append(max_sensor_range / max_sensor_range)
 
-    # Truncate if it's too long
     readings = readings[:NUM_SENSORS]
 
-    # --- Convert to tensor and get model prediction ---
     state_tensor = torch.tensor(readings, dtype=torch.float32, device=agent.device).unsqueeze(0)
 
     with torch.no_grad():
@@ -151,14 +136,10 @@ def return_action(state: dict):
         action_tensor = action_q_values.max(1)[1].view(1, 1)
 
     action_index = action_tensor.item()
-    action_string = ACTION_MAP.get(action_index, 'NOTHING')  # Default to 'NOTHING' if index is out of bounds
+    action_string = ACTION_MAP.get(action_index, 'NOTHING')
 
-    # --- Format the output for the API ---
-    return {
-        "action_type": "string",
-        "actions": [action_string]
-    }
-
+    # --- FIX: Return only the list of actions ---
+    return [action_string]
 
 # This part below is for local testing with Pygame and will not be run by the API server.
 if __name__ == '__main__':
