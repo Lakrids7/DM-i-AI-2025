@@ -1,157 +1,218 @@
-#core.py
+# core.py
 
 import pygame
 from time import sleep
-#import requests
-#from typing import List, Optional
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+import numpy as np
+import random
+from collections import namedtuple, deque
+import os
+
 from ..mathematics.randomizer import seed, random_choice, random_number
 from ..elements.car import Car
 from ..elements.road import Road
 from ..elements.sensor import Sensor
 from ..mathematics.vector import Vector
-import json
-import numpy as np
 
 # Define constants
 SCREEN_WIDTH = 1600
 SCREEN_HEIGHT = 1200
 LANE_COUNT = 5
-CAR_COLORS = ['yellow', 'blue', 'red']
 MAX_TICKS = 60 * 60  # 60 seconds @ 60 fps
-MAX_MS = 60 * 1000600   # 60 seconds flat
+MAX_MS = 60 * 1000
 
-# Q-learning parameters
-env_actions = ['STEER_LEFT', 'STEER_RIGHT', 'NOTHING']
-#env_states = ['LEFT_SIDE_CLOSE', 'RIGHT_SIDE_CLOSE', 'FRONT_SIDE_CLOSE', 'BACK_SIDE_CLOSE']
+# --- NEW: DQN Setup ---
+# Define the structure of an experience replay tuple
+Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'))
 
-
-# Hyperparameters
-LEARNING_RATE = 0.1
-DISCOUNT_FACTOR = 0.95
-EPSILON = 0.9
-EPSILON_DECAY = 0.999
-MIN_EPSILON = 0.05
-q_table = {}
-
-#TODO: Add delay for actions, so it doesn't perform an action every tick?
+# Define the action space for the DQN agent
+# NOTE: We now use integer indices for actions to work with PyTorch
+ACTION_MAP = {0: 'STEER_LEFT', 1: 'STEER_RIGHT', 2: 'NOTHING'}
+NUM_ACTIONS = len(ACTION_MAP)
 
 
-def save_q_table(filename="q_table.json"):
-    """Saves the Q-table dictionary to a JSON file."""
-    try:
-        with open(filename, 'w') as f:
-            # Convert tuple keys to strings because JSON does not support tuple keys
-            string_keyed_q_table = {str(k): v for k, v in q_table.items()}
-            json.dump(string_keyed_q_table, f, indent=4)
-        print(f"Q-table successfully saved to {filename}")
-    except Exception as e:
-        print(f"Error saving Q-table: {e}")
+# Define the DQN model architecture
+class DQN(nn.Module):
+    def __init__(self, n_observations, n_actions):
+        super(DQN, self).__init__()
+        # A simple multi-layer perceptron (MLP)
+        # Input layer: Number of sensor readings (n_observations)
+        # Hidden Layer 1: 128 neurons, with ReLU activation
+        # Hidden Layer 2: 128 neurons, with ReLU activation
+        # Output Layer: Q-values for each possible action (n_actions)
+        self.layer1 = nn.Linear(n_observations, 128)
+        self.layer2 = nn.Linear(128, 128)
+        self.layer3 = nn.Linear(128, n_actions)
 
-def load_q_table(filename="q_table.json"):
-    """Loads a Q-table from a JSON file."""
-    global q_table
-    try:
-        with open(filename, 'r') as f:
-            string_keyed_q_table = json.load(f)
-            q_table = {eval(k): v for k, v in string_keyed_q_table.items()}
-        print(f"Q-table successfully loaded from {filename}")
-    except FileNotFoundError:
-        print(f"No Q-table file found at {filename}. Starting with a new empty table.")
-    except Exception as e:
-        print(f"Error loading Q-table: {e}")
+    def forward(self, x):
+        """The forward pass of the network."""
+        x = F.relu(self.layer1(x))
+        x = F.relu(self.layer2(x))
+        return self.layer3(x)
 
 
-# In core.py
+# Define the Replay Memory for storing experiences
+class ReplayMemory(object):
+    def __init__(self, capacity):
+        self.memory = deque([], maxlen=capacity)
 
-def get_simplified_state(state):
-    """
-    Converts sensor readings into a binary state for 8 directional sectors.
-    The state for each sector is either 1 (Close) or 0 (Far).
+    def push(self, *args):
+        """Save a transition"""
+        self.memory.append(Transition(*args))
 
-    Returns a tuple representing the 8 sectors in clockwise order starting from the front.
-    """
-    # --- FINAL SIMPLIFIED LOGIC ---
+    def sample(self, batch_size):
+        """Sample a random batch of transitions for training"""
+        return random.sample(self.memory, batch_size)
 
-    # This is the ONLY threshold that matters. If an object is closer than this,
-    # the state is 1 (Close). Otherwise, it's 0 (Far).
-    CLOSE_THRESHOLD = 300
+    def __len__(self):
+        return len(self.memory)
 
-    # This is NOT a threshold. It is just a default value for when sensors see nothing.
-    DEFAULT_FALLBACK_DISTANCE = 1000
 
-    # The eight directional sensor groups with 3 sensors each.
-    # Some sensors are shared between adjacent groups for overlap.
-    SENSOR_GROUPS = {
-        'front': ['front_left_front', 'front', 'front_right_front'],
-        'front_right': ['front_right_front', 'right_front', 'right_side_front'],
-        'right': ['right_side_front', 'right_side', 'right_side_back'],
-        'back_right': ['right_side_back', 'right_back', 'back_right_back'],
-        'back': ['back_right_back', 'back', 'back_left_back'],
-        'back_left': ['back_left_back', 'left_back', 'left_side_back'],
-        'left': ['left_side_back', 'left_side', 'left_side_front'],
-        'front_left': ['left_side_front', 'left_front', 'front_left_front']
-    }
+# The main Agent class that encapsulates the model and learning logic
+class DQNAgent:
+    def __init__(self, n_observations, n_actions, config):
+        """
+        Initializes the agent with a configuration dictionary.
+        """
+        # Hyperparameters are now sourced from the config dictionary
+        self.batch_size = config['BATCH_SIZE']
+        self.gamma = config['GAMMA']
+        self.eps_start = config['EPS_START']
+        self.eps_end = config['EPS_END']
+        self.eps_decay = config['EPS_DECAY']
+        self.tau = config['TAU']
+        self.lr = config['LR']
+        self.memory = ReplayMemory(config['MEMORY_CAPACITY'])
 
-    sensor_readings = {sensor.name: sensor.reading for sensor in state.sensors}
+        self.n_actions = n_actions
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Using device: {self.device}")
 
-    # Helper function to get the minimum valid distance for a group
-    def get_min_distance_for_group(group_name):
-        valid_distances = [
-            sensor_readings.get(sensor_name)
-            for sensor_name in SENSOR_GROUPS[group_name]
-            if sensor_readings.get(sensor_name) is not None
-        ]
-        if valid_distances:
-            return min(valid_distances)
+        self.policy_net = DQN(n_observations, n_actions).to(self.device)
+        self.target_net = DQN(n_observations, n_actions).to(self.device)
+        self.target_net.load_state_dict(self.policy_net.state_dict())
+        self.optimizer = optim.AdamW(self.policy_net.parameters(), lr=self.lr, amsgrad=True)
+        self.steps_done = 0
+
+    def select_action(self, state):
+        """Selects an action using an epsilon-greedy policy."""
+        sample = random.random()
+        # Calculate the current epsilon value based on decay
+        epsilon = self.eps_end + (self.eps_start - self.eps_end) * \
+                  np.exp(-1. * self.steps_done / self.eps_decay)
+        self.steps_done += 1
+
+        if sample > epsilon:
+            # --- EXPLOIT: Choose the best action from the policy network ---
+            with torch.no_grad():
+                # state.max(1) returns the largest Q-value and its index for each batch item
+                # We use .view(1, 1) to create a tensor of the correct shape for an action
+                return self.policy_net(state).max(1)[1].view(1, 1)
         else:
-            return DEFAULT_FALLBACK_DISTANCE
+            # --- EXPLORE: Choose a random action ---
+            return torch.tensor([[random.randrange(self.n_actions)]], device=self.device, dtype=torch.long)
 
-    # Get the nearest detected object distance for each sector
-    min_front = get_min_distance_for_group('front')
-    min_front_right = get_min_distance_for_group('front_right')
-    min_right = get_min_distance_for_group('right')
-    min_back_right = get_min_distance_for_group('back_right')
-    min_back = get_min_distance_for_group('back')
-    min_back_left = get_min_distance_for_group('back_left')
-    min_left = get_min_distance_for_group('left')
-    min_front_left = get_min_distance_for_group('front_left')
+    def optimize_model(self):
+        """Performs one step of optimization on the policy network."""
+        if len(self.memory) < self.batch_size:
+            return  # Don't train until we have enough samples
+
+        transitions = self.memory.sample(self.batch_size)
+        batch = Transition(*zip(*transitions))  # Converts batch-array of Transitions to Transition of batch-arrays.
+
+        # Create batches of states, actions, and rewards
+        non_final_mask = torch.tensor(tuple(map(lambda s: s is not None, batch.next_state)), device=self.device,
+                                      dtype=torch.bool)
+        non_final_next_states = torch.cat([s for s in batch.next_state if s is not None])
+        state_batch = torch.cat(batch.state)
+        action_batch = torch.cat(batch.action)
+        reward_batch = torch.cat(batch.reward)
+
+        # Compute Q(s_t, a) - the model computes Q(s_t), then we select the columns of actions taken.
+        state_action_values = self.policy_net(state_batch).gather(1, action_batch)
+
+        # Compute V(s_{t+1}) for all next states.
+        next_state_values = torch.zeros(self.batch_size, device=self.device)
+        with torch.no_grad():
+            next_state_values[non_final_mask] = self.target_net(non_final_next_states).max(1)[0]
+
+        # Compute the expected Q values: R + γ * max_a' Q_target(s', a')
+        expected_state_action_values = (next_state_values * self.gamma) + reward_batch
+
+        # Compute Huber loss
+        criterion = nn.SmoothL1Loss()
+        loss = criterion(state_action_values, expected_state_action_values.unsqueeze(1))
+
+        # Optimize the model
+        self.optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_value_(self.policy_net.parameters(), 100)  # Gradient clipping
+        self.optimizer.step()
+
+    def update_target_net(self):
+        """Soft update of the target network's weights."""
+        target_net_state_dict = self.target_net.state_dict()
+        policy_net_state_dict = self.policy_net.state_dict()
+        for key in policy_net_state_dict:
+            target_net_state_dict[key] = policy_net_state_dict[key] * self.tau + target_net_state_dict[key] * (
+                        1 - self.tau)
+        self.target_net.load_state_dict(target_net_state_dict)
+
+    def save_model(self, path="dqn_model.pth"):
+        torch.save(self.policy_net.state_dict(), path)
+        print(f"Model saved to {path}")
+
+    def load_model(self, path="dqn_model.pth"):
+        if os.path.exists(path):
+            self.policy_net.load_state_dict(torch.load(path))
+            self.target_net.load_state_dict(self.policy_net.state_dict())
+            self.policy_net.eval()  # Set model to evaluation mode
+            self.target_net.eval()
+            print(f"Model loaded from {path}")
+        else:
+            print(f"No model found at {path}, starting from scratch.")
 
 
-    # --- The Binary State Calculation ---
-    # Convert each distance to a simple 0 or 1.
-    front_state = 1 if min_front < CLOSE_THRESHOLD else 0
-    front_right_state = 1 if min_front_right < CLOSE_THRESHOLD else 0
-    right_state = 1 if min_right < CLOSE_THRESHOLD else 0
-    back_right_state = 1 if min_back_right < CLOSE_THRESHOLD else 0
-    back_state = 1 if min_back < CLOSE_THRESHOLD else 0
-    back_left_state = 1 if min_back_left < CLOSE_THRESHOLD else 0
-    left_state = 1 if min_left < CLOSE_THRESHOLD else 0
-    front_left_state = 1 if min_front_left < CLOSE_THRESHOLD else 0
+def get_raw_state(game_state):
+    """
+    Extracts raw sensor readings and normalizes them to be the state.
+    Returns a PyTorch tensor.
+    """
+    max_sensor_range = 1000.0  # A reasonable max value for normalization
 
+    # Get all sensor readings, use max_range if a sensor sees nothing (None)
+    readings = [
+        (sensor.reading if sensor.reading is not None else max_sensor_range) / max_sensor_range
+        for sensor in game_state.sensors
+    ]
 
-    # Return the final state tuple.
-    return (front_state, front_right_state, right_state, back_right_state,
-            back_state, back_left_state, left_state, front_left_state)
+    # Ensure we always have a fixed size state (e.g., if sensors can be removed)
+    # This example assumes a fixed number of sensors. If not, padding would be needed.
 
-
+    # Convert to a PyTorch tensor and add a batch dimension
+    state_tensor = torch.tensor(readings, dtype=torch.float32,
+                                device="cuda" if torch.cuda.is_available() else "cpu").unsqueeze(0)
+    return state_tensor
 
 
 # Define game state
 class GameState:
     def __init__(self, api_url: str):
+        self.api_url = api_url
         self.ego = None
         self.cars = []
         self.car_bucket = []
         self.sensors = []
         self.road = None
-        self.statistics = None
-        self.sensors_enabled = True
-        self.api_url = api_url
         self.crashed = False
-        self.elapsed_game_time = 0
         self.distance = 0
-        self.latest_action = "NOTHING"
         self.ticks = 0
+        self.sensor_readings = []
+        self.sensors_enabled = True
+
 
 STATE = None
 
@@ -159,7 +220,7 @@ STATE = None
 def intersects(rect1, rect2):
     return rect1.colliderect(rect2)
 
-# Game logic
+
 def handle_action(action: str):
     if action == "ACCELERATE":
         STATE.ego.speed_up()
@@ -169,8 +230,9 @@ def handle_action(action: str):
         STATE.ego.turn(-0.1)
     elif action == "STEER_RIGHT":
         STATE.ego.turn(0.1)
-    else:
+    else:  # NOTHING
         pass
+
 
 def update_cars():
     for car in STATE.cars:
@@ -180,14 +242,8 @@ def update_cars():
 def remove_passed_cars():
     min_distance = -1000
     max_distance = SCREEN_WIDTH + 1000
-    cars_to_keep = []
-    cars_to_retire = []
-
-    for car in STATE.cars:
-        if car.x < min_distance or car.x > max_distance:
-            cars_to_retire.append(car)
-        else:
-            cars_to_keep.append(car)
+    cars_to_keep = [car for car in STATE.cars if min_distance < car.x < max_distance]
+    cars_to_retire = [car for car in STATE.cars if car not in cars_to_keep]
 
     for car in cars_to_retire:
         STATE.car_bucket.append(car)
@@ -195,25 +251,23 @@ def remove_passed_cars():
 
     STATE.cars = cars_to_keep
 
+
 def place_car():
     if len(STATE.cars) > LANE_COUNT:
         return
 
-    speed_coeff_modifier = 5
-    x_offset_behind = -0.5
-    x_offset_in_front = 1.5
-
     open_lanes = [lane for lane in STATE.road.lanes if not any(c.lane == lane for c in STATE.cars if c != STATE.ego)]
+    if not open_lanes: return
+
     lane = random_choice(open_lanes)
-    x_offset = random_choice([x_offset_behind, x_offset_in_front])
-    horizontal_velocity_coefficient = random_number() * speed_coeff_modifier
+    x_offset = random_choice([-0.5, 1.5])  # Behind or in front
+    speed_diff = random_number() * 5
 
     car = STATE.car_bucket.pop() if STATE.car_bucket else None
-    if not car:
-        return
+    if not car: return
 
-    velocity_x = STATE.ego.velocity.x + horizontal_velocity_coefficient if x_offset == x_offset_behind else STATE.ego.velocity.x - horizontal_velocity_coefficient
-    car.velocity = Vector(velocity_x, 0)
+    velocity_x = STATE.ego.velocity.x + speed_diff if x_offset == -0.5 else STATE.ego.velocity.x - speed_diff
+    car.velocity = Vector(max(2, velocity_x), 0)  # Ensure cars don't stand still
     STATE.cars.append(car)
 
     car_sprite = car.sprite
@@ -222,435 +276,149 @@ def place_car():
     car.lane = lane
 
 
-def get_action_json():
-    """
-    Get action depending on tick from the actions_log.json.
-    Finds the action for the current STATE.ticks.
-    """
-    try:
-        with open("actions_log.json", "r") as f:
-            actions = json.load(f)
-            for entry in actions:
-                if entry.get("tick") == STATE.ticks:
-                    return entry.get("action", "NOTHING")
-            return "NOTHING"
-    except FileNotFoundError:
-        return "NOTHING"
+# This now assumes a fixed number of sensors for the DQN input layer
+NUM_SENSORS = 16
 
 
-def initialize_game_state( api_url: str, seed_value: str, sensor_removal = 0):
+def initialize_game_state(api_url: str, seed_value: str = None, sensor_removal = 0):
+    """
+    Initializes the entire game environment for a new episode.
+    """
+    # --- FIX: Call the seed function UNCONDITIONALLY ---
+    # The seed() function should handle a `None` value to ensure the
+    # random number generator is always initialized.
     seed(seed_value)
+
     global STATE
     STATE = GameState(api_url)
 
-    # Create environment
     STATE.road = Road(SCREEN_WIDTH, SCREEN_HEIGHT, LANE_COUNT)
     middle_lane = STATE.road.middle_lane()
     lane_height = STATE.road.get_lane_height()
 
-    # Create ego car
     ego_velocity = Vector(10, 0)
     STATE.ego = Car("yellow", ego_velocity, lane=middle_lane, target_height=int(lane_height * 0.8))
-    ego_sprite = STATE.ego.sprite
-    STATE.ego.x = (SCREEN_WIDTH // 2) - (ego_sprite.get_width() // 2)
-    STATE.ego.y = int((middle_lane.y_start + middle_lane.y_end) / 2 - ego_sprite.get_height() / 2)
+    # Start the car a bit to the left to give it more room initially
+    STATE.ego.x = (SCREEN_WIDTH // 4) - (STATE.ego.sprite.get_width() // 2)
+    STATE.ego.y = int((middle_lane.y_start + middle_lane.y_end) / 2 - STATE.ego.sprite.get_height() / 2)
+
+    # Define a fixed set of sensors, distributed evenly in a circle
     sensor_options = [
-            #Front group
-            (90, "front"),
-            (67.5, "front_left_front"), #IGNORE
-            (112.5, "front_right_front"), #IGNORE
+        (angle, f"sensor_{i}") for i, angle in enumerate(np.linspace(0, 360, NUM_SENSORS, endpoint=False))
+    ]
 
-            #Back group
-            (270, "back"),
-            (247.5, "back_right_back"), #IGNORE
-            (292.5, "back_left_back"), #IGNORE
-
-            #Right group
-            (157.5, "right_side_front"),
-            (202.5, "right_side_back"),
-            (135, "right_front"),
-            (180, "right_side"),
-            (225, "right_back"),
-
-            #Left group
-            (315, "left_back"),
-            (0, "left_side"),
-            (45, "left_front"),
-            (22.5, "left_side_front"),
-            (337.5, "left_side_back"),
-
-        ]
-
-    for _ in range(sensor_removal): # Removes random sensors
-        random_sensor = random_choice(sensor_options)
-        sensor_options.remove(random_sensor)
     STATE.sensors = [
         Sensor(STATE.ego, angle, name, STATE)
         for angle, name in sensor_options
     ]
+    STATE.sensor_readings = [0.0] * len(STATE.sensors)
 
-    # Create other cars and add to car bucket
-    for i in range(0, LANE_COUNT - 1):
-        car_colors = ["blue", "red"]
-        color = random_choice(car_colors)
-        car = Car(color, Vector(8, 0), target_height=int(lane_height * 0.8))
+    # Create a bucket of cars to be placed on the road during the game
+    for i in range(LANE_COUNT):
+        car = Car(random_choice(["blue", "red"]), Vector(8, 0), target_height=int(lane_height * 0.8))
         STATE.car_bucket.append(car)
 
+    # Start the game with only the ego car on the road
     STATE.cars = [STATE.ego]
 
-def update_game(current_action: str):
-    handle_action(current_action)
-    STATE.distance += STATE.ego.velocity.x
-    update_cars()
-    remove_passed_cars()
-    place_car()
-    for sensor in STATE.sensors:
-        sensor.update()
 
-    return STATE
-
-def get_action_manual(state):
-    """
-    Reads pygame events and returns an action string based on arrow keys or spacebar.
-    Up: ACCELERATE, Down: DECELERATE, Left: STEER_LEFT, Right: STEER_RIGHT, Space: NOTHING
-    """
-
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            pygame.quit()
-            exit()
-
-
-    # Holding down keys
-    keys = pygame.key.get_pressed()
-
-    # Priority: accelerate, decelerate, steer left, steer right, nothing
-    if keys[pygame.K_RIGHT]:
-        return ["ACCELERATE"]
-    if keys[pygame.K_LEFT]:
-        return ["DECELERATE"]
-    if keys[pygame.K_UP]:
-        return ["STEER_LEFT"]
-    if keys[pygame.K_DOWN]:
-        return ["STEER_RIGHT"]
-    if keys[pygame.K_SPACE]:
-        return ["NOTHING"]
-
-    # Just clicking once and it keeps doing it until a new press
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            pygame.quit()
-            exit()
-        if event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_RIGHT:
-                return ["ACCELERATE"]
-            elif event.key == pygame.K_LEFT:
-                return ["DECELERATE"]
-            elif event.key == pygame.K_UP:
-                return ["STEER_LEFT"]
-            elif event.key == pygame.K_DOWN:
-                return ["STEER_RIGHT"]
-            elif event.key == pygame.K_SPACE:
-                return ["NOTHING"]
-    print(f"Velocity is {state.ego.velocity.x}, {state.ego.velocity.y}")
-
-    # If no relevant key is pressed, repeat last action or do nothing
-    #return STATE.latest_action if hasattr(STATE, "latest_action") else "NOTHING"
-    return "NOTHING"
-
-def get_action_rule_based(state):
-    """
-    An improved rule-based agent that adjusts its behavior based on its current speed.
-    1. It uses DYNAMIC safety zones: the faster it goes, the more cautious it becomes.
-    2. It has a TARGET cruising speed to avoid accelerating uncontrollably.
-    3. It includes a corrective "nudge" to avoid side-swipes.
-    """
-    # =================================================================================
-    # --- TUNABLE PARAMETERS ---
-    # You can adjust these values to change the car's "personality".
-    #
-    # The desired speed when the road is clear.
-    TARGET_CRUISING_SPEED = 12
-    # How much the safety zones should increase per unit of speed.
-    # Higher value = more cautious at high speeds.
-    SPEED_SENSITIVITY_FACTOR = 18
-    # The base distance for making a lane change.
-    BASE_WARNING_ZONE = 200
-    # The base distance for slamming the brakes.
-    BASE_DANGER_ZONE = 100
-    # The minimum side clearance needed to consider a lane change safe.
-    SIDE_CLEARANCE = 300
-    # **NEW**: The distance at which a car on the side is considered an immediate threat.
-    SIDE_DANGER_ZONE = 400
-    # =================================================================================
-
-    # Define Sensor Groups (as before)
-    SENSOR_GROUPS = {
-        'front': [
-            'front'
-        ],
-        'right': [
-            'right_side_front',
-            'right_side_back',
-            'right_front',
-            'right_side',
-            'right_back',
-            'front_right_front'
-        ],
-        'left': [
-            'left_back',
-            'left_side',
-            'left_front',
-            'left_side_front',
-            'left_side_back',
-            'front_left_front'
-        ]
-    }
-    sensor_readings = {sensor.name: sensor.reading for sensor in state.sensors}
-    DEFAULT_CLEAR_DISTANCE = 1000
-
-    # Aggregate Sensor Readings (as before)
-    grouped_distances = {}
-    for group_name, sensor_list in SENSOR_GROUPS.items():
-        min_distance = DEFAULT_CLEAR_DISTANCE
-        for sensor_name in sensor_list:
-            reading = sensor_readings.get(sensor_name)
-            if reading is not None and reading < min_distance:
-                min_distance = reading
-        grouped_distances[group_name] = min_distance
-
-    front_dist = grouped_distances.get('front', DEFAULT_CLEAR_DISTANCE)
-    left_dist = grouped_distances.get('left', DEFAULT_CLEAR_DISTANCE)
-    right_dist = grouped_distances.get('right', DEFAULT_CLEAR_DISTANCE)
-
-    # Get Current State Information ---
-    current_speed = state.ego.velocity.x
-
-    # The warning and danger zones now grow based on the car's speed.
-    # This makes the car look further ahead when it's moving faster.
-    dynamic_warning_zone = BASE_WARNING_ZONE + (current_speed * SPEED_SENSITIVITY_FACTOR)
-    dynamic_danger_zone = BASE_DANGER_ZONE + (
-                current_speed * SPEED_SENSITIVITY_FACTOR / 2)  # Danger zone grows less aggressively
-
-
-    # LOWEST): CLEAR ROAD (SPEED MANAGEMENT)
-
-    if current_speed < TARGET_CRUISING_SPEED:
-        action = "NOTHING"
-    else:
-        action = "NOTHING"
-
-    # --- PRIORITY 3: POTENTIAL DANGER AHEAD (PROACTIVE LANE CHANGE) ---
-    # This overrides the default action if an object is in the warning zone.
-    if front_dist < dynamic_warning_zone:
-        if left_dist > right_dist and left_dist > SIDE_CLEARANCE:
-            action = "STEER_LEFT"
-        elif right_dist > SIDE_CLEARANCE:
-            action = "STEER_RIGHT"
-        else:
-            # Both lanes are blocked, so we must slow down.
-            action = "DECELERATE"
-
-    # --- PRIORITY 2: IMMEDIATE SIDE DANGER (CORRECTIVE NUDGE) ---
-    # **NEW LOGIC**: This overrides any previous decision if a car is too close on the side.
-    if left_dist < SIDE_DANGER_ZONE:
-        action = "STEER_RIGHT"
-    elif right_dist < SIDE_DANGER_ZONE:
-        action = "STEER_LEFT"
-
-    # --- PRIORITY 1 (HIGHEST): IMMEDIATE FRONT DANGER (EMERGENCY BRAKE) ---
-    # This check has the final say and will override ALL other decisions.
-    if front_dist < dynamic_danger_zone:
-        action = "DECELERATE"
-
-    # For debugging: print what the agent is "thinking"
-    debug_msg = (
-        f"Speed: {current_speed:.1f} | "
-        f"Dist(F/L/R): {int(front_dist)}/{int(left_dist)}/{int(right_dist)} | "
-        f"Zones(W/D): {int(dynamic_warning_zone)}/{int(dynamic_danger_zone)} | "
-        f"ACTION: {action}"
-    )
-    print(debug_msg)
-
-    return [action]
-
-
-def get_action_Q_learning(state):
-    # First, get the current simplified state from our helper function.
-    current_state = get_simplified_state(state)
-
-    # --- NEW Q-LEARNING CODE: STEP 2 ---
-
-    # Before choosing an action, we must ensure this state is in our Q-table.
-    # If we've never encountered this state before, we initialize it with a Q-value of 0 for every possible action.
-    if current_state not in q_table:
-        q_table[current_state] = {action: 0 for action in env_actions}
-        print(f"New state discovered! Initializing Q-values for: {current_state}")  # For debugging
-
-    # This is the Epsilon-Greedy strategy.
-    # We generate a random number between 0 and 1.
-    # If it's less than Epsilon, we choose a random action (Explore).
-    # Otherwise, we choose the best-known action from our Q-table (Exploit).
-    if random_number() < EPSILON:
-        # --- EXPLORE ---
-        # Choose a completely random action from the list of available actions.
-        action = random_choice(env_actions)
-        print(f"State: {current_state} -> Exploring: Chose random action '{action}'")  # For debugging
-    else:
-        # --- EXPLOIT ---
-        # Look up the Q-values for the current state.
-        state_q_values = q_table[current_state]
-        # Find the action that has the highest Q-value.
-        # The `max()` function with a key is a clean way to find the key in a dictionary corresponding to the maximum value.
-        action = max(state_q_values, key=state_q_values.get)
-        print(
-            f"State: {current_state} -> Exploiting: Chose best action '{action}' with Q-value: {state_q_values[action]:.2f}")  # For debugging
-
-    # The game loop expects a list of actions, so we wrap our chosen action in a list.
-    return [action]
-
-# Main game loop
-ACTION_LOG = []
-
-# Main game loop
-ACTION_LOG = []
-
-
-def game_loop(verbose: bool = True, log_actions: bool = True, log_path: str = "actions_log.json"):
-    global STATE, EPSILON
+def game_loop(agent: DQNAgent, verbose: bool = True):
+    """Main game loop for a single episode, now driven by the DQN agent."""
+    global STATE
     clock = pygame.time.Clock()
     screen = None
-    actions = []
     if verbose:
         screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-        pygame.display.set_caption("Race Car Game")
+        pygame.display.set_caption("DQN Race Car")
 
     while True:
-        delta = clock.tick(60)
-        STATE.elapsed_game_time += delta
+        clock.tick(60)
         STATE.ticks += 1
 
-        # Observe the state BEFORE taking an action.
-        old_state = get_simplified_state(STATE)
-        # --- NEW CODE: Record distance before the step ---
-        old_distance = STATE.distance
+        # 1. Observe the current state
+        current_state_tensor = get_raw_state(STATE)
 
-        if not actions:
-            action_list = get_action_Q_learning(STATE)
-            for act in action_list:
-                actions.append(act)
-        action = actions.pop()
+        # 2. Select and perform an action
+        action_tensor = agent.select_action(current_state_tensor)
+        action_index = action_tensor.item()
+        action_string = ACTION_MAP[action_index]
+        handle_action(action_string)
 
-        if log_actions:
-            ACTION_LOG.append({"tick": STATE.ticks, "action": action})
-
-        # --- Game Simulation ---
-        handle_action(action)
-        # The line below updates the total distance
+        # 3. Update the game simulation
         STATE.distance += STATE.ego.velocity.x
         update_cars()
         remove_passed_cars()
         place_car()
-
         for sensor in STATE.sensors:
             sensor.update()
 
+        # 4. Check for collisions (done state)
+        STATE.crashed = False
         for car in STATE.cars:
             if car != STATE.ego and intersects(STATE.ego.rect, car.rect):
                 STATE.crashed = True
-
         for wall in STATE.road.walls:
             if intersects(STATE.ego.rect, wall.rect):
                 STATE.crashed = True
-        # --- End of Simulation ---
 
-        # Get the new state and calculate the reward.
-        new_state = get_simplified_state(STATE)
+        done = STATE.crashed or STATE.ticks > MAX_TICKS
+
+        # 5. Define the reward
         reward = 0
         if STATE.crashed:
-            reward = -10
+            reward = -100  # Severe penalty for crashing
         else:
-            # --- UPDATED REWARD LOGIC ---
-            # Reward is the actual distance traveled in this single step.
-            #distance_this_tick = STATE.distance - old_distance
-            #reward = distance_this_tick
+            # --- NEW REWARD STRUCTURE ---
+            # 1. Reward for forward speed (as before)
+            velocity_reward = STATE.ego.velocity.x / 10.0
 
-            #TEST: Change reward to just staying alive
-            #TODO: Monitor whether this works
-            reward = 0.1
+            # 2. Reward for staying alive
+            survival_reward = 0.1  # A small, constant reward for every tick
 
-        # Update the Q-table (this logic remains the same)
-        if new_state not in q_table:
-            q_table[new_state] = {act: 0 for act in env_actions}
+            # 3. Penalty for being too close to the side walls
+            # This encourages staying centered in the lane.
+            lane_center = STATE.road.middle_lane().y_start + (STATE.road.get_lane_height() / 2)
+            car_center_y = STATE.ego.y + (STATE.ego.get_bounds().height / 2)
+            # Penalize based on the square of the distance from the center
+            centering_penalty = -0.5 * ((car_center_y - lane_center) / (SCREEN_HEIGHT / 2)) ** 2
 
-        old_q_value = q_table[old_state][action]
-        max_future_q = max(q_table[new_state].values())
-        new_q_value = old_q_value + LEARNING_RATE * (reward + DISCOUNT_FACTOR * max_future_q - old_q_value)
-        q_table[old_state][action] = new_q_value
+            reward = velocity_reward + survival_reward + centering_penalty
 
-        print(
-            f"Tick: {STATE.ticks} | State: {old_state} | Action: {action} | Reward: {reward:.2f} | New State: {new_state}")
+            # Small penalty for steering to encourage smooth driving
+            if action_string != 'NOTHING':
+                reward -= 0.05
 
-        # Game over check (remains the same)
-        if STATE.crashed or STATE.ticks > MAX_TICKS or STATE.elapsed_game_time > MAX_MS:
-            print(f"Game over: Crashed: {STATE.crashed}, Ticks: {STATE.ticks}, Distance: {STATE.distance}")
-            print(f"Final Epsilon: {EPSILON}")
-            break
+        reward_tensor = torch.tensor([reward], device=agent.device)
 
-        # --- NEW CODE: Update sensor colors based on proximity ---
-        # This assumes your Sensor class has a 'color' attribute that its 'draw' method uses.
-        CLOSE_THRESHOLD = 300  # Should match the value in get_simplified_state
-        for sensor in STATE.sensors:
-            if sensor.reading is not None and sensor.reading < CLOSE_THRESHOLD:
-                sensor.color = (0, 255, 0)  # Green for "close"
-            else:
-                sensor.color = (255, 0, 0)  # Red for "far" or no reading
+        # 6. Observe the new state
+        if not done:
+            next_state_tensor = get_raw_state(STATE)
+        else:
+            next_state_tensor = None
 
-        # Rendering
+        # 7. Store the transition in memory
+        agent.memory.push(current_state_tensor, action_tensor, next_state_tensor, reward_tensor)
+
+        # 8. Perform one step of the optimization (on the policy network)
+        agent.optimize_model()
+
+        # 9. Soft update of the target network's weights
+        agent.update_target_net()
+
+        # --- Rendering ---
         if verbose:
             screen.fill((0, 0, 0))
             screen.blit(STATE.road.surface, (0, 0))
-            for wall in STATE.road.walls: wall.draw(screen)
             for car in STATE.cars:
-                if car.sprite:
-                    screen.blit(car.sprite, (car.x, car.y))
-                    bounds = car.get_bounds()
-                    color = (255, 0, 0) if car == STATE.ego else (0, 255, 0)
-                    pygame.draw.rect(screen, color, bounds, width=2)
-                else:
-                    pygame.draw.rect(screen, (255, 255, 0) if car == STATE.ego else (0, 0, 255), car.rect)
-            if STATE.sensors_enabled:
-                for sensor in STATE.sensors: sensor.draw(screen) # The draw call now uses the updated color
+                screen.blit(car.sprite, (car.x, car.y))
+                bounds = car.get_bounds()
+                color = (255, 0, 0) if car == STATE.ego else (0, 255, 0)
+                pygame.draw.rect(screen, color, bounds, width=2)
+            for sensor in STATE.sensors:
+                sensor.draw(screen)
             pygame.display.flip()
 
-
-    # Epsilon decay (remains the same)
-    if EPSILON > MIN_EPSILON:
-        EPSILON *= EPSILON_DECAY
+        if done:
+            break
 
     return STATE
-
-
-    # # Save actions to file after game ends
-    # import os
-    # if log_actions:
-    #     log_dir = os.path.dirname(log_path)
-    #     if log_dir and not os.path.exists(log_dir):
-    #         os.makedirs(log_dir, exist_ok=True)
-    #     with open(log_path, "w") as f:
-    #         json.dump(ACTION_LOG, f, indent=2)
-
-# Initialization - not used
-def init(api_url: str):
-    global STATE
-    STATE = GameState(api_url)
-    print(f"Game initialized with API URL: {api_url}")
-
-
-# Entry point
-if __name__ == "__main__":
-    seed_value = "static_seed"
-    pygame.init()
-    initialize_game_state("http://example.com/api/predict", seed_value)  # Replace with actual API URL
-    game_loop(verbose=True)  # Change to verbose=False for headless mode
-    pygame.quit()

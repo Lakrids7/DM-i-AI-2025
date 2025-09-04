@@ -1,0 +1,14 @@
+{
+    "NUM_EPISODES": 15000,
+    "SAVE_INTERVAL": 50,
+    "LOG_INTERVAL": 10,
+    "BATCH_SIZE": 128,
+    "GAMMA": 0.99,
+    "EPS_START": 0.9,
+    "EPS_END": 0.05,
+    "EPS_DECAY": 1500000,
+    "TAU": 0.005,
+    "LR": 0.0001,
+    "MEMORY_CAPACITY": 10000,
+    "LOAD_MODEL_PATH": null
+}

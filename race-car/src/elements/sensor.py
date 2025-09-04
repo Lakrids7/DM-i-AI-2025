@@ -35,7 +35,7 @@ class Sensor:
         self.state = state
 
     def update(self):
-        # ... this method is unchanged ...
+
         visible = self.state.sensors_enabled
         car_rect = self.car.get_bounds()
         car_center = Vector(car_rect.centerx, car_rect.centery)
