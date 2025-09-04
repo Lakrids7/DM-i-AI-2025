@@ -153,7 +153,7 @@ def return_action(state: dict):
     if action_string == 'NOTHING':
         # Accelerate 50% of the time when the model says "NOTHING".
         # You can change 0.5 to a higher or lower value to make it more or less aggressive.
-        if random.random() < 0.2:
+        if random.random() < 0.0:
             action_string = 'ACCELERATE'
 
     # Return the final action in the required list format
