@@ -82,7 +82,7 @@ NUM_SENSORS = 16
 NUM_ACTIONS = 3  # The model was trained to output one of 3 actions
 
 # The action map must match the output of the neural network
-ACTION_MAP = {0: 'STEER_LEFT', 1: 'STEER_RIGHT', 2: 'ACCELERATE'}
+ACTION_MAP = {0: 'STEER_LEFT', 1: 'STEER_RIGHT', 2: 'NOTHING'}
 
 # Define the configuration your agent was trained with.
 config = {
@@ -108,11 +108,19 @@ print("--- Trained model loaded successfully. Ready for inference. ---")
 
 def return_action(state: dict):
     """
-    Processes the raw game state dictionary and returns a list of actions.
+    Processes the raw game state dictionary, gets a model prediction,
+    and occasionally overrides 'NOTHING' with 'ACCELERATE'.
+
+    Args:
+        state (dict): The current state of the game, received as a dictionary.
+
+    Returns:
+        list: A list containing the final action string for the API.
     """
     max_sensor_range = 1000.0
     sensor_data = state.get('sensors', [])
 
+    # Robustly parse sensor data
     readings = []
     for reading in sensor_data:
         try:
@@ -124,11 +132,13 @@ def return_action(state: dict):
         except (ValueError, TypeError):
             readings.append(max_sensor_range / max_sensor_range)
 
+    # Ensure the list is the correct size
     while len(readings) < NUM_SENSORS:
         readings.append(max_sensor_range / max_sensor_range)
 
     readings = readings[:NUM_SENSORS]
 
+    # Convert to tensor and get model prediction
     state_tensor = torch.tensor(readings, dtype=torch.float32, device=agent.device).unsqueeze(0)
 
     with torch.no_grad():
@@ -138,8 +148,17 @@ def return_action(state: dict):
     action_index = action_tensor.item()
     action_string = ACTION_MAP.get(action_index, 'NOTHING')
 
-    # --- FIX: Return only the list of actions ---
+    # --- NEW LOGIC: Occasionally accelerate ---
+    # If the model thinks it's safe to do nothing, there's a chance we can accelerate instead.
+    if action_string == 'NOTHING':
+        # Accelerate 50% of the time when the model says "NOTHING".
+        # You can change 0.5 to a higher or lower value to make it more or less aggressive.
+        if random.random() < 0.5:
+            action_string = 'ACCELERATE'
+
+    # Return the final action in the required list format
     return [action_string]
+
 
 # This part below is for local testing with Pygame and will not be run by the API server.
 if __name__ == '__main__':
