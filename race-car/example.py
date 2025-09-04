@@ -113,17 +113,16 @@ def return_action(state: dict):
         dict: A dictionary containing the action chosen by the model.
     """
     # --- 1. PREPROCESS THE INPUT ---
-    # This logic is based on the 'get_raw_state' function from your core.py
     max_sensor_range = 1000.0  # Use the same normalization value as during training
 
     # Extract sensor readings from the input dictionary.
-    # The key 'sensors' might be different; check your project's DTOs if this fails.
     sensor_data = state.get('sensors', [])
 
-    # Create a clean, normalized list of sensor readings
+    # --- FIX: Treat each item in sensor_data as the reading itself ---
+    # The error showed that `sensor_data` is a list of values, not a list of dicts.
     readings = [
-        (sensor['reading'] if sensor.get('reading') is not None else max_sensor_range) / max_sensor_range
-        for sensor in sensor_data
+        (float(reading) if reading is not None else max_sensor_range) / max_sensor_range
+        for reading in sensor_data
     ]
 
     # --- 2. CONVERT TO TENSOR ---
