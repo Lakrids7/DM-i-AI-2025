@@ -88,7 +88,7 @@ class DQNAgent:
         self.memory = ReplayMemory(config['MEMORY_CAPACITY'])
 
         self.n_actions = n_actions
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cpu")
         print(f"Using device: {self.device}")
 
         self.policy_net = DQN(n_observations, n_actions).to(self.device)
@@ -194,7 +194,7 @@ def get_raw_state(game_state):
 
     # Convert to a PyTorch tensor and add a batch dimension
     state_tensor = torch.tensor(readings, dtype=torch.float32,
-                                device="cuda" if torch.cuda.is_available() else "cpu").unsqueeze(0)
+                                device="cpu").unsqueeze(0)
     return state_tensor
 
 
