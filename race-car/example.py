@@ -22,9 +22,6 @@ config = {
 # Initialize the agent
 agent = DQNAgent(n_observations=NUM_SENSORS, n_actions=NUM_ACTIONS, config=config)
 
-# IMPORTANT: Specify the path to your trained model file.
-# This should be the 'dqn_model.pth' file from one of your training runs.
-# For example: "training_runs/2023-10-27_10-30-00/dqn_model.pth"
 TRAINED_MODEL_PATH = "training_runs/2025-09-03_15-49-52/dqn_model.pth"
 agent.load_model(TRAINED_MODEL_PATH)
 agent.policy_net.eval()  # Set the model to evaluation mode

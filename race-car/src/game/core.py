@@ -167,7 +167,7 @@ class DQNAgent:
 
     def load_model(self, path="dqn_model.pth"):
         if os.path.exists(path):
-            self.policy_net.load_state_dict(torch.load(path))
+            self.policy_net.load_state_dict(torch.load(path, map_location=torch.device("cpu")))
             self.target_net.load_state_dict(self.policy_net.state_dict())
             self.policy_net.eval()  # Set model to evaluation mode
             self.target_net.eval()
